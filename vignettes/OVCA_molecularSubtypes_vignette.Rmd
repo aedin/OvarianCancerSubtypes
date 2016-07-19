@@ -1,0 +1,242 @@
+---
+title: "Predict OVCA Subtypes"
+author: aedin culhane
+date: '`r Sys.Date()`'
+output:
+  html_document:
+     toc: yes
+bibliography: suppl.bib
+---
+```{r setup}
+datadir = "../data"
+srcdir= "../R"
+source(file.path(srcdir, "ovca.R"))
+
+library(made4)
+library(curatedOvarianData)
+library(caret)
+```
+
+
+
+## The TCGA molecular subtypes
+
+The TCGA study [@TCGA2012] have described four high grade serous ovarian cancer molecular subtypes which are correlated to following the AOCS subtypes;
+
+```{}
+-------     -----------
+  AOCS      TCGA
+------      ------------
+  C1        mesenchymal
+  C2        immunoreative
+  C4        differentiated *
+  C5        proliferative
+------      --------------
+ 
+ * Note, C4 also correlated to immunoreative.
+```
+
+
+We downloaded a 100 gene signature of the TCGA molecular subtypes which was published as Supplementary Table 7 in the research article by Verhaak et al [@Verhaak2013]
+
+Of these 100 genes, 90 were in the Bioconductor curatedOvarianData TCGA_eset [@Ganzfried2013]
+
+
+```{r TCGA100Genes, warning=FALSE, message=FALSE}
+require(curatedOvarianData)
+data("TCGA_eset")
+
+# Read TCGA 100 Gene Signature
+tcgaGenes<-read.table(file.path(datadir,"23257362","Verhaak_13_CLOVAR100_Subtype.csv"), header=TRUE,  sep=",", as.is=TRUE)
+
+boxplot(cbind(TCGA_eset$percent_normal_cells, TCGA_eset$percent_tumor_cells,TCGA_eset$percent_stromal_cells), ylim=c(0,100), names=c("N", "T", "TS"), col=c("grey", "yellow2", "green3"))
+
+## Read the predicted subtypes of datasets
+tcgaAnnotSubtypes<-read.table(file.path(datadir,"23257362", "Verhaak_13_suppl_SupplTab1.csv"), header=TRUE,  sep=",", skip=1, as.is=TRUE)
+#table(tcgaAnnotSubtypes$DATASET)
+
+
+
+# Filter the TCGA genes to those present in the curatedOVarianData TCGA_eset
+print("Number of TCGA genes in the curatedOVarianData eset")
+print(table(tcgaGenes[,1]%in%featureNames(TCGA_eset)))
+tcgaGenes<-tcgaGenes[tcgaGenes[,1]%in%featureNames(TCGA_eset),]
+
+```
+
+The TCGA_eSet in the curated ovarian data contained 578 samples. Among these,  488 were in the discovery set, and we knew the tumor TCGA subtype classification.
+ 
+
+```{r Compare_TCGA_Annot}
+## Short code to compare the annotation of the 489 discovery subset from the first and second TCGA papers
+## TCGA_489_UE.k4.txt was emailed by Roel Verhaak with the subtypes from the first TCGA paper
+
+# Read TCGA tumor subtypes from the first TCGA paper.
+tcgaSubtypesPaper1<-read.table(file.path(datadir,"23257362", "TCGA_489_UE.k4.txt"), sep="\t", header=TRUE, as.is=TRUE)
+
+## Create a vector of the shortened Sample ID
+tcgaSubtypesPaper1[,3]<-sub("-01[A,B,C,D]-0[1,2,3]R$", "", gsub("\\.", "\\-", tcgaSubtypesPaper1[,1]))
+rownames(tcgaSubtypesPaper1) = tcgaSubtypesPaper1[,3]
+
+tcgaAnnotSubtypes<-read.table(file.path(datadir,"23257362", "Verhaak_13_suppl_SupplTab1.csv"), header=TRUE,  sep=",", skip=1, as.is=TRUE)
+#table(tcgaAnnotSubtypes$DATASET)
+
+tt2<-tcgaAnnotSubtypes[grep("TCGA-discover",tcgaAnnotSubtypes$DATASET),]
+rownames(tt2) = tt2$ID
+TCGA_eset$SUBTYPE= tt2[TCGA_eset$unique_patient_ID,]$SUBTYPE
+TCGA_eset$DATASET = "Validation"
+TCGA_eset$DATASET[TCGA_eset$unique_patient_ID %in% tt2$ID]  ="DISCOVERY"
+  
+## Rownames are the same
+#comparelists(rownames(tt2), rownames(tt1))
+tcgaSubtypesPaper1<-tcgaSubtypesPaper1[rownames(tt2),]
+
+## All TRUE, good annotation has not changed
+if (!identical(tcgaSubtypesPaper1$k4, tt2$SUBTYPE)) print("TCGA annotation issue")
+```
+
+```{r TCGA_subtypes_TCGAgenes}
+#TCGA_eset[tcgaGenes[,1],]
+table(TCGA_eset$DATASET,TCGA_eset$SUBTYPE)
+```
+
+A hierarchical cluster analysis of the 90 molecular subtype genes, partitioned the TCGA tumor samples into subtypes. The Differentiated and Immunoreative clustered apart from the Mesenchymal and Proliferative subtypes.  
+
+```{r TCGAHeatmap}
+heatplot(TCGA_eset[as.character(tcgaGenes[,1]),], classvec=TCGA_eset$SUBTYPE,classvecCol =c("gray80", "grey20", "navy", "cyan"))
+legend("topright", legend=levels(factor(TCGA_eset$SUBTYPE)), fill=c("gray80", "grey20", "navy", "cyan"), cex=0.5)
+```
+
+One of the samples in the Verhaak annotation was missing in TCGA_eSet."TCGA-13-0760" is absent in the curatedOvarianData package.   There are also 2 other samples ("TCGA-61-2611", "TCGA-61-2610" ) listed in the validation set that are missing.
+
+```{r missing}
+table(tcgaAnnotSubtypes[tcgaAnnotSubtypes[,1]%in%TCGA_eset$unique_patient_ID, "DATASET"])
+tt2<-tcgaAnnotSubtypes[grep("TCGA",tcgaAnnotSubtypes$DATASET),]
+comparelists(tt2[,1],TCGA_eset$unique_patient_ID)$Set.Diff
+#comparelists(TCGA_eset$unique_patient_ID, tt2[,1])$Set.Diff
+```
+
+
+
+
+## The TCGA molecular subtypes: building a classifier
+
+We built a SSP classifier of TCGA molecular subtypes using the 100 gene signature which were published as Supplementary Table 7 in the research article by Verhaak et al  [@Verhaak2013]
+
+There were 90 of the 100 genes in the curatedOvarianData TCGA_eset and this subset of 90 were used to train the SSP classifier.  This performed with an overall self-validation accuracy of 89%. 
+
+
+For a quick a dirty will use same approach as AOCS, then will build model
+```{r tcgaSCM}
+tcga_scm<-build.tcga() 
+predictTCGA<-predict.tcga(eSet=TCGA_eset,  tcga.model=tcga_scm, corThres=0.7)
+
+print(confusionMatrix(factor(predictTCGA$Predict), factor(TCGA_eset$SUBTYPE, levels=levels(factor((predictTCGA$Predict))))))
+```
+
+## TCGA molecular subtypes in microdissected tumor and stroma 
+
+Apply the TCGA molecular subtype SSP classifier to the AOCS dataset.  
+
+```{r tcgaPredict}
+require(curatedOvarianData)
+data("GSE9891_eset") # AOCS dataset
+pt<-predict.tcga(GSE9891_eset, tcga.model=tcga_scm, corThres=0.7)
+print("AOCS subtypes in microdissected tumors")
+table(pt$Predict)
+```
+
+```{r plotPredictT}
+tt<-plot.predict(pt)
+title(main="Correlation of MGH tumors to TCGA subtyes")
+```
+
+*Spearman correlation of TCGA tumors to the centroids of TCGA subtpes *
+
+## Comparing AOCS and TCGA classification.
+The subtypes calls for the AOCS patients was published by Tothill, read the data
+
+```{r AOCSsu}
+supplClinAOCS<-read.csv(file.path(datadir, "18698038", "AOCSclinicaldata.csv"))
+rownames(supplClinAOCS) = toupper(sub("\\.cel$", "",supplClinAOCS$X))
+identical(rownames(supplClinAOCS),sampleNames(GSE9891_eset))
+supplClinAOCS<-supplClinAOCS[sampleNames(GSE9891_eset),]
+
+```
+
+Cross-tabulation of TCGA subtypes and AOCS subtypes.
+```{r xtab}
+table(pt$Predict,supplClinAOCS$k.means.Group)
+```
+
+
+
+
+# Predicting OVCA molecular subtype background
+Gene lists that predict AOCS molecular and TCGA subtypes were downloaded as online publication supplements  [@Tothill2008,@Verhaak2013] curated and submitted to GeneSigDB [@Culhane2012]. 
+ 
+In this code, we downloaded the genelists and use  a simple single sample predictor (SSP) approachfor classification  [@HaibeKains2012; @Perou2000]. Tumors are classified as a molecular subtype, if a tumor had highest Spearman correlation to the median gene expression profile of the subtype, compared to the correlation to the median gene expression of the other subtypes.
+
+## The AOCS molecular subtypes: building a classifier
+
+The AOCS data is available as GSE9891_eset in the curatedOvarianData package, where features are GeneSymbols. In the case below, we downloaded it from GEO as I wanted probeIDs are features. However the map strategdy can be used to generate a classifier from GSE9891_eset
+
+
+```{r buildaocs}
+#Load AOCS (probeset) data
+load(file.path(datadir,'AOCS_eSet.RData'))
+tothill<-read.csv(file.path(datadir,"18698038", "18698038-TableS2.txt"), sep="\t", header=TRUE, as.is=TRUE)
+AOCS_sig<-tothill[tothill[,1]%in%featureNames(aocs_eSet),]
+aocs.sig=unique(AOCS_sig[,1])
+if (!file.exists(file.path(datadir,"AOCS_Classifier_TothillGenes.Rda"))) {
+  aocs.scm<-build.aocs(aocs_eSet, aocs.sig)
+  save(aocs.scm,aocs.sig,file=file.path(datadir,"AOCS_Classifier_TothillGenes.Rda"))
+}
+```
+
+```{r loadAOCSModel}
+load(file.path(datadir,"AOCS_Classifier_TothillGenes.Rda"))
+```
+
+The Single Sample Predictor (SSP) classifier was trained using the published gene lists of the AOCS C1, C2, C4 and C5 molecular subtypes. The SSP identifies the subtype of a single tumor using a nearest centroid classifier and has been widely applied in molecular subtype classification in breast cancer  [@HaibeKains2012; @Perou2000].   It  predicted the AOCS molecular subtypes with an overall **self-validation accuracy** of 95%.  Sensitivity and specificityfor each subtype were is given below.
+
+```{r aocsPred}
+aocsPredict<-predict.aocs(eSet=aocs_eSet, aocs.model=aocs.scm, corThres=0.7)
+#table(factor(aocsPredict$Predict), factor(aocs_eSet$k.means.Group))
+#table(factor(aocs_eSet$MS), factor(aocs_eSet$k.means.Group))
+print(confusionMatrix(factor(aocsPredict$Predict), factor(aocs_eSet$MS, levels=levels(factor(aocsPredict$Predict)))))
+
+
+n=nrow(aocsPredict[order(aocs_eSet$MS),])
+
+plot.predict(aocsPredict[order(aocs_eSet$MS),], reorderByClass = FALSE, colLab=aocs_eSet$k.means.Group[order(aocs_eSet$MS)], xlab="Tumors") 
+title(main="Correlation of AOCS tumors to C1,C2,C4,C5 centroids")
+```
+
+In each case tumors are assigned to the subtype centroid to which it has highest correlation. Where there was no "winner", tumors has low correlation to all subtypes (cor<0.7), it was  unclassfied. 
+
+```{r aocsClassSucc, fig.width=8, fig.height=10}
+aocsPredict[aocsPredict$Predict=="Unclassified",]
+par(mfrow=c(2,2))
+for (i in colnames(aocsPredict)[1:4]) {boxplot(aocsPredict[aocsPredict$Predict==i,1:4], main=paste0("Classification of ",i ), las=3,ylim=c(0.4,1)); abline(h=0.7,lty=2,col="red" )}
+```
+
+It can be seens that C1 and C2 tumors, showed weaker correlation but >0.7 correlation to C1,C2 and C4 tumors. C1 and C2 tumors had lowest correlation to C5 tumors. Consistent with this, C5 were easier to classify, and mostly had <0.7 correlation to C1,C2,C4. This was reflect in the confusious matrix above, were C5 tumors were classified with the higher Balanced Accuracy (0.98), Sensitivity (0.97) and Specificity (0.99).
+
+*Spearman correlation of `r n` AOCS tumor samples to the centroid predictor for molecular subtype C1 (light grey), C2 (dark grey), C4 (navy), C5 (cyan).*
+
+## AOCS molecular subtypes in curatedOvarianData
+
+
+Example of applying classifiers to public data
+
+```{r CuratedOvarianData, eval=FALSE}
+require(curatedOvarianData)
+testaocsPredict<-predict.aocs(Tumors, aocs.model=aocs.scm,corThres=0.7)
+
+#Plot of results
+plot.predict(testaocsPredict, colLab=Tumors$alt_sample_name, xlab="Tumors") 
+
+```
+
+
